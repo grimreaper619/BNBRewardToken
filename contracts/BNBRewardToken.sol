@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Unlicensed
-pragma solidity ^0.8.6;
+pragma solidity ^0.8.10;
  
 import "./DividendPayingToken.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
@@ -7,8 +7,9 @@ import "./IterableMapping.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import '@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol';
 import '@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol';
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 
-contract SampleToken is ERC20, Ownable {
+contract BNBRewardToken is ERC20, Ownable {
     using SafeMath for uint256;
  
     IUniswapV2Router02 public uniswapV2Router;
@@ -18,32 +19,38 @@ contract SampleToken is ERC20, Ownable {
     struct BuyFee{
         uint16 rewardFee;
         uint16 marketingFee;
+        uint16 liquidityFee;
+        uint16 teamFee;
     }
 
     struct SellFee{
         uint16 rewardFee;
         uint16 marketingFee;
         uint16 liquidityFee;
+        uint16 teamFee;
     }
     
     bool private swapping;
 
     BuyFee public buyFee;
     SellFee public sellFee;
- 
+    
+    uint16[2] private sellTax = [20,30];
     TokenDividendTracker public dividendTracker;
  
-    uint256 public swapTokensAtAmount = 2 * 10**8 * (10**9);
+    uint256 public swapTokensAtAmount = 2 * 10**15 * (10**9);
  
     uint16 private totalBuyFee;
     uint16 private totalSellFee;
  
     bool public swapEnabled;
     
-    address payable _marketingWallet;
+    address payable _marketingWallet = payable(address(0x123));
+    address payable _teamWallet = payable(address(0x456));
  
     // use by default 300,000 gas to process auto-claiming dividends
     uint256 public gasForProcessing = 300000;
+    uint256 private launchDate;
  
     mapping (address => bool) private _isExcludedFromFees;
  
@@ -90,14 +97,17 @@ contract SampleToken is ERC20, Ownable {
     }
  
     constructor() ERC20("Token", "TKN") {
-        buyFee.rewardFee = 12;
+        buyFee.rewardFee = 2;
         buyFee.marketingFee = 4;
-        totalBuyFee = buyFee.rewardFee + buyFee.marketingFee;
+        buyFee.liquidityFee = 2;
+        buyFee.teamFee = 3;
+        totalBuyFee = 11;
 
-        sellFee.rewardFee = 12;
-        sellFee.marketingFee = 4;
+        sellFee.rewardFee = 3;
+        sellFee.marketingFee = 5;
         sellFee.liquidityFee = 2;
-        totalSellFee = sellFee.rewardFee + sellFee.marketingFee + sellFee.liquidityFee;
+        sellFee.teamFee = 3;
+        totalSellFee = 13;
 
         _marketingWallet = payable(address(0x123));
     	dividendTracker = new TokenDividendTracker();
@@ -128,7 +138,7 @@ contract SampleToken is ERC20, Ownable {
             _mint is an internal function in ERC20.sol that is only called here,
             and CANNOT be called ever again
         */
-        _mint(owner(), 1 * 10**12 * (10**9));
+        _mint(owner(), 1 * 10**18 * (10**9));
     }
  
     receive() external payable {}
@@ -201,17 +211,20 @@ contract SampleToken is ERC20, Ownable {
         gasForProcessing = newValue;
     }
 
-    function setBuyFee(uint16 rewardfee, uint16 marketing) external onlyOwner {
+    function setBuyFee(uint16 rewardfee, uint16 marketing, uint16 liquidity, uint16 team) external onlyOwner {
         buyFee.rewardFee = rewardfee;
         buyFee.marketingFee = marketing;
-        totalBuyFee = rewardfee + marketing;
+        buyFee.liquidityFee = liquidity;
+        buyFee.teamFee = team;
+        totalBuyFee = rewardfee + marketing + liquidity + team;
     }
 
-    function setSellFee(uint16 rewardfee, uint16 marketing, uint16 liquidity) external onlyOwner {
+    function setSellFee(uint16 rewardfee, uint16 marketing, uint16 liquidity, uint16 team) external onlyOwner {
         sellFee.rewardFee = rewardfee;
         sellFee.marketingFee = marketing;
         sellFee.liquidityFee = liquidity;
-        totalSellFee = rewardfee + marketing + liquidity;
+        sellFee.teamFee = team;
+        totalSellFee = rewardfee + marketing + liquidity + team;
     }
  
     function updateClaimWait(uint256 claimWait) external onlyOwner {
@@ -263,6 +276,18 @@ contract SampleToken is ERC20, Ownable {
             uint256) {
     	return dividendTracker.getAccountAtIndex(index);
     }
+
+    function getTokenPrice(uint256 amount)
+        internal
+        view
+        returns (uint256)
+    {  
+
+        IUniswapV2Pair pair = IUniswapV2Pair(uniswapV2Pair);
+        (uint256 Res0, uint256 Res1, ) = pair.getReserves();
+
+        return ((amount * Res0) / Res1); // return amount of token0 needed to buy token1
+    }
  
 	function processDividendTracker(uint256 gas) external {
 		(uint256 iterations, uint256 claims, uint256 lastProcessedIndex) = dividendTracker.process(gas);
@@ -271,6 +296,10 @@ contract SampleToken is ERC20, Ownable {
  
     function claim() external {
 		dividendTracker.processAccount(payable(msg.sender), false);
+    }
+
+    function launch() external onlyOwner {
+        launchDate = block.timestamp;
     }
  
     function getLastProcessedIndex() external view returns(uint256) {
@@ -308,6 +337,7 @@ contract SampleToken is ERC20, Ownable {
         bool overMinimumTokenBalance = contractTokenBalance >= swapTokensAtAmount;
 
         if(swapEnabled && !swapping && from != uniswapV2Pair && overMinimumTokenBalance) {
+
             contractTokenBalance = swapTokensAtAmount;
             uint16 totalFee = totalBuyFee + totalSellFee;
 
@@ -318,8 +348,13 @@ contract SampleToken is ERC20, Ownable {
             uint256 marketingTokens = contractTokenBalance.mul(
                 buyFee.marketingFee + sellFee.marketingFee).div(totalFee);
             swapAndSendToMarketing(marketingTokens);
+
+            uint256 teamTokens = contractTokenBalance.mul(
+                buyFee.teamFee + sellFee.teamFee).div(totalFee);
+            swapAndSendToTeam(teamTokens);
  
-            uint256 sellTokens = balanceOf(address(this));
+            uint256 sellTokens = contractTokenBalance.mul(
+                buyFee.rewardFee + sellFee.rewardFee).div(totalFee);
             swapAndSendDividends(sellTokens);
  
         }
@@ -333,10 +368,28 @@ contract SampleToken is ERC20, Ownable {
  
         if(takeFee) {
         	uint256 fees;
+            uint256 maxWalletAmount;
+
+            if(block.timestamp > launchDate + 30 days){
+                maxWalletAmount = totalSupply() * 5 / 100;
+            }else{
+                maxWalletAmount = totalSupply() * 3 / 100;
+            }
+
+            if(!automatedMarketMakerPairs[to]){
+                require(amount + balanceOf(to) <= maxWalletAmount,"Wallet amount exceeds limit");
+            }
 
             if(automatedMarketMakerPairs[to]) {
-                fees = totalSellFee;
+                if(amount > balanceOf(from) / 2){
+                    fees = sellTax[1];
+                }else if(amount > balanceOf(from) / 4){
+                    fees = sellTax[0];
+                }else{
+                    fees = totalSellFee;
+                }
             }else if(automatedMarketMakerPairs[from]){
+                require(getTokenPrice(amount) <= 4 ether,"Purchase lower amount");
                 fees = totalBuyFee;
             }
 
@@ -371,6 +424,17 @@ contract SampleToken is ERC20, Ownable {
         // how much ETH did we just swap into?
         uint256 newBalance = address(this).balance.sub(initialBalance);
          _marketingWallet.transfer(newBalance); 
+    }
+
+    function swapAndSendToTeam(uint256 tokens) private lockTheSwap {
+ 
+        uint256 initialBalance = address(this).balance;
+ 
+        swapTokensForEth(tokens);
+        // how much ETH did we just swap into?
+        uint256 newBalance = address(this).balance.sub(initialBalance);
+
+         _teamWallet.transfer(newBalance); 
     }
     
     function addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
